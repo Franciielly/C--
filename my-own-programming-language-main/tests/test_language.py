@@ -1,0 +1,225 @@
+import unittest
+from unittest.mock import patch
+
+from cminusminus import run_expression, run_statement
+from cminusminus.ast_nodes import BinaryOperation, Number
+from cminusminus.errors import EvaluationError, LexerError, ParserError
+from cminusminus.lexer import tokenize
+from cminusminus.parser import parse
+
+
+class LanguageTests(unittest.TestCase):
+    def test_arithmetic(self):
+        examples = {
+            "42": 42,
+            "2 + 3": 5,
+            "10 - 4": 6,
+            "3 * 4": 12,
+            "10 / 4": 2.5,
+            "10 % 3": 1,
+            "20 % 5": 0,
+            "2 + 10 % 4 * 2": 6,
+            "5 <= 5": 1,
+            "6 >= 5": 1,
+            "4 <= 3": 0,
+            "4 >= 5": 0,
+            "2 + 3 * 4": 14,
+            "(2 + 3) * 4": 20,
+            "10 - 3 - 2": 5,
+            "20 / 2 / 5": 2.0,
+            "8 / 2 * 3": 12.0,
+            "-5": -5,
+            "+3": 3,
+            "-(2 + 4)": -6,
+            "2 * -3": -6,
+            "2--3": 5,
+            "--5": 5,
+            "1.5 + 2.25": 3.75,
+            " \t2 + 3\n": 5,
+            "((2 + 3) * (4 - 1))": 15,
+        }
+        for source, expected in examples.items():
+            with self.subTest(source=source):
+                self.assertEqual(run_expression(source), expected)
+
+    def test_ast_precedence(self):
+        self.assertEqual(
+            parse("2 + 3 * 4"),
+            BinaryOperation(Number(2), "+", BinaryOperation(Number(3), "*", Number(4), 6), 2),
+        )
+
+    def test_token_positions(self):
+        tokens = tokenize(" 12.5 + 2")
+        self.assertEqual([token.kind for token in tokens], ["NUMBER", "+", "NUMBER", "EOF"])
+        self.assertEqual([token.position for token in tokens], [1, 6, 8, 9])
+
+    def test_invalid_syntax(self):
+        for source in ("", " ", "1 +", "* 2", "()", "(2 + 3", "2 + 3)", "2 3", "2(3)", "2 ** 3", "2 // 3"):
+            with self.subTest(source=source):
+                with self.assertRaises(ParserError):
+                    run_expression(source)
+
+    def test_invalid_characters(self):
+        for source in ("2 @ 3", "1,5", ".5", "1.", "1.2.3", "\u0661"):
+            with self.subTest(source=source):
+                with self.assertRaises(LexerError):
+                    run_expression(source)
+
+    def test_undeclared_variable_in_expression(self):
+        with self.assertRaisesRegex(EvaluationError, "nao foi criada"):
+            run_expression("abc")
+
+
+    def test_ler_receives_text_from_user(self):
+        variables = {}
+        with patch("builtins.input", return_value="Francielly") as entrada:
+            run_statement('cria nome = ler("Qual seu nome? ")', variables)
+        self.assertEqual(variables["nome"], "Francielly")
+        entrada.assert_called_once_with("Qual seu nome? ")
+
+    def test_ler_numero_receives_integer_from_user(self):
+        variables = {}
+        with patch("builtins.input", return_value="20"):
+            run_statement('cria idade = ler_numero("Digite sua idade: ")', variables)
+        self.assertEqual(variables["idade"], 20)
+
+    def test_ler_numero_receives_decimal_from_user(self):
+        variables = {}
+        with patch("builtins.input", return_value="1.75"):
+            run_statement('cria altura = ler_numero("Altura: ")', variables)
+        self.assertEqual(variables["altura"], 1.75)
+
+    def test_ler_numero_rejects_invalid_input(self):
+        variables = {}
+        with patch("builtins.input", return_value="vinte"):
+            with self.assertRaisesRegex(EvaluationError, "digite um numero"):
+                run_statement('cria idade = ler_numero("Idade: ")', variables)
+
+    def test_comments(self):
+        self.assertEqual(run_expression("2 + 3 # comentario"), 5)
+        self.assertEqual([t.kind for t in tokenize("7 # comentario")], ["NUMBER", "EOF"])
+
+    def test_incompatible_comparison_types_are_language_errors(self):
+        with self.assertRaisesRegex(EvaluationError, "Tipos incompativeis"):
+            run_expression('"texto" < 3')
+
+    def test_modulo_by_zero(self):
+        with self.assertRaisesRegex(EvaluationError, "Modulo por zero"):
+            run_expression("10 % 0")
+
+    def test_scientific_notation_is_not_supported(self):
+        with self.assertRaises(ParserError):
+            run_expression("1e3")
+
+    def test_division_by_zero(self):
+        for source in ("8 / 0", "1 / (2 - 2)", "1 / -0.0"):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(EvaluationError, "Divisao por zero"):
+                    run_expression(source)
+
+    def test_error_position(self):
+        with self.assertRaises(LexerError) as context:
+            run_expression("2 + @")
+        self.assertEqual(context.exception.position, 4)
+        self.assertIn("coluna 5", str(context.exception))
+
+    def test_float_limits(self):
+        with self.assertRaises(ParserError):
+            run_expression("9" * 400 + ".0")
+        with self.assertRaises(EvaluationError):
+            run_expression("1" + "0" * 200 + ".0 * 1" + "0" * 200 + ".0")
+
+    def test_depth_limit(self):
+        with self.assertRaises(EvaluationError):
+            run_expression("(" * 2000 + "1" + ")" * 2000)
+
+    def test_variables_and_statements(self):
+        from cminusminus import compile_statement, run_statement
+
+        variables = {}
+        self.assertIsNone(run_statement("cria total = 2 + 3 * 4", variables))
+        self.assertEqual(run_statement("mostrar(total)", variables), 14)
+        self.assertIsNone(run_statement("total = total + 6", variables))
+        self.assertEqual(run_statement("total", variables), 20)
+        self.assertEqual(
+            compile_statement("cria numero = 3").__class__.__name__,
+            "CreateStatement",
+        )
+
+    def test_variable_errors(self):
+        from cminusminus import run_statement
+
+        variables = {}
+        with self.assertRaisesRegex(EvaluationError, "nao foi criada"):
+            run_statement("valor = 2", variables)
+        run_statement("cria valor = 2", variables)
+        with self.assertRaisesRegex(EvaluationError, "ja foi criada"):
+            run_statement("cria valor = 3", variables)
+
+    def test_statement_syntax_errors(self):
+        from cminusminus import compile_statement
+
+        for source in ("cria = 2", "cria x 2", "mostrar()", "mostrar(2", "x ="):
+            with self.subTest(source=source), self.assertRaises(ParserError):
+                compile_statement(source)
+
+
+    def test_identifiers_are_tokenized(self):
+        self.assertEqual(
+            [token.kind for token in tokenize("cria resultado = valor_2")],
+            ["CREATE", "IDENTIFIER", "=", "IDENTIFIER", "EOF"],
+        )
+
+    def test_while_keywords_are_tokenized(self):
+        tokens = tokenize("enquanto fim_enquanto")
+
+        self.assertEqual(
+            [token.kind for token in tokens],
+            ["WHILE", "END_WHILE", "EOF"],
+        )
+
+    def test_while_keywords_keep_their_text(self):
+        tokens = tokenize("enquanto fim_enquanto")
+
+        self.assertEqual(
+            [token.text for token in tokens],
+            ["enquanto", "fim_enquanto", ""],
+        )
+
+        
+    def test_string_literals_and_concatenation(self):
+        from cminusminus import run_statement
+
+        variables = {}
+        self.assertEqual(run_statement('mostrar("O resultado e " + (2 + 3))', variables),
+                         "O resultado e 5")
+        self.assertEqual(run_statement("'valor: ' + 2.5", variables), "valor: 2.5")
+        self.assertEqual(run_statement('"linha\\nseguinte"', variables), "linha\nseguinte")
+        self.assertEqual(run_statement('"aspas: \\"ok\\""', variables), 'aspas: "ok"')
+
+    def test_string_variables_and_concatenation(self):
+        from cminusminus import run_statement
+
+        variables = {}
+        self.assertIsNone(run_statement('cria saudacao = "Ola, "', variables))
+        self.assertIsNone(run_statement('saudacao = saudacao + "mundo!"', variables))
+        self.assertEqual(run_statement("mostrar(saudacao)", variables), "Ola, mundo!")
+        self.assertEqual(run_statement('mostrar("Total: " + (10 / 2))', variables), "Total: 5.0")
+
+    def test_non_additive_string_operations_are_rejected(self):
+        from cminusminus import run_statement
+
+        for source in ('"texto" - 1', '"texto" * 2', '-"texto"'):
+            with self.subTest(source=source), self.assertRaisesRegex(
+                EvaluationError, "numeric"
+            ):
+                run_statement(source, {})
+
+    def test_invalid_string_literals(self):
+        for source in ('"sem fechamento', '"escape \\q"', '"multilinha\nstring"'):
+            with self.subTest(source=source), self.assertRaises(LexerError):
+                tokenize(source)
+
+
+if __name__ == "__main__":
+    unittest.main()
